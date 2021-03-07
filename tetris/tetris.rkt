@@ -17,7 +17,9 @@
   (overlay (square tile-size "solid" c)
            (square tile-size "outline" "white")))
 
-(struct posn (x y))
+;; set to transparent so we can use equal? on them
+(struct posn (x y) #:transparent)
+
 (define p00 (posn 0 0))
 (define p10 (posn 1 0))
 (define p20 (posn 2 0))
@@ -140,6 +142,7 @@
                          (random (length minos)))
                (posn 4 0)))
 
+
 ;; mino and all tile blocks
 (define all-game-objects
   (append (map (λ (x)
@@ -154,39 +157,83 @@
         [else
          (game-object-block o)]))
 
-;; TODO: disable rotation when constrained by tiles
-(define (rotate-current!)
-  (local [(define m (game-object-block current))]
-    (begin (set-mino-img! m (rotate 270 (mino-img m)))
-           (if (= (+ (mino-idx m) 1)
-                  (length (mino-blockposns m)))
-               (set-mino-idx! m 0)
-               (set-mino-idx! m (+ (mino-idx m) 1))))))
-
-;; TODO: disable move when blocked by tiles
-(define (move-aside! moveright?)
+(define (cannot-rotate?)
   (local [(define c (game-object-block current))
+          (define pss (mino-blockposns c))
+          (define nidx (if (= (+ (mino-idx c) 1)
+                              (length pss))
+                           0
+                           (+ (mino-idx c) 1)))
+          (define ps (list-ref pss nidx))
           (define p (game-object-position current))
           (define x (posn-x p))
           (define y (posn-y p))]
-    (cond [moveright?
-           (when (< x (- 9
-                         (max-x (list-ref (mino-blockposns c)
-                                          (mino-idx c)))))
-             (set-game-object-position! current
-                                        (posn (+ 1 x) y)))]
-          [else
-           (when (> x 0)
-             (set-game-object-position! current
-                                        (posn (- x 1) y)))])))
+    (or (> (+ (posn-x p) (max-x ps)) 9)
+        (ormap (λ (a)
+                 (member a (get-tileps)))
+               (map (λ (a)
+                      (posn (+ (posn-x a) x)
+                      (+ (posn-y a) y)))
+                    ps)))))
+                      
+;; rotate current falling mino unless constrained
+(define (rotate-current!)
+  (local [(define m (game-object-block current))]
+    (unless (cannot-rotate?)
+      (begin (set-mino-img! m (rotate 270 (mino-img m)))
+             (if (= (+ (mino-idx m) 1)
+                    (length (mino-blockposns m)))
+                 (set-mino-idx! m 0)
+                 (set-mino-idx! m (+ (mino-idx m) 1)))))))
 
-(define (get-tiles)
-  (filter (λ(a) (not (mino? (game-object-block a))))
-          all-game-objects))
+;; posns of current mino
+(define (posns)
+  (local [(define c (game-object-block current))
+          (define ps (list-ref (mino-blockposns c)
+                               (mino-idx c)))
+          (define p (game-object-position current))
+          (define x (posn-x p))
+          (define y (posn-y p))]
+    (map (λ (a)
+           (posn (+ (posn-x a) x)
+                 (+ (posn-y a) y)))
+         ps)))
+
+;; integer(1 or -1) -> boolean
+;; determine if mino can move aside
+(define (can-move? direction)
+  (local [(define c (game-object-block current))
+          (define size (max-x (list-ref (mino-blockposns c)
+                                        (mino-idx c))))
+          (define p (game-object-position current))
+          (define x (posn-x p))]
+    (and (>= (+ x direction) 0)
+         (<= (+ x direction) (- 9 size))
+         (andmap (λ (a)
+                   (not (member a (get-tileps))))
+                 (map (λ (pn)
+                        (posn (+ (posn-x pn) direction)
+                              (posn-y pn)))
+                      (posns))))))
+                   
+
+;; move sideway: 1 for right, -1 for left
+(define (move-aside! direction)
+  (local [(define p (game-object-position current))
+          (define x (posn-x p))
+          (define y (posn-y p))]
+    (when (can-move? direction)
+      (set-game-object-position! current
+                                 (posn (+ x direction) y)))))
+
+(define (get-tileps)
+  (map game-object-position
+       (filter (λ(a) (not (mino? (game-object-block a))))
+               all-game-objects)))
 
 (define (get-tile-posns-at x)
   (filter (λ(a) (= x (posn-x a)))
-          (map game-object-position (get-tiles))))
+          (get-tileps)))
 
 ;; find highest tile
 ;; highest here means smallest
@@ -205,6 +252,25 @@
                          1))
                     (list-ref (mino-blockposns m)
                               (mino-idx m))))))
+
+#| this doesn't work
+the newly added text/image will not be rendered in todraw
+(define (game-over? g)
+  (if (and (<= (space-to-drop) 0)
+           (= (posn-y (game-object-position current)) 0))
+      (begin
+        (set! all-game-objects
+              (cons (game-object (text/font "Game Over!" 32 "white"
+                                            #f "modern" "normal"
+                                            "bold" #f)
+                                 (posn 0 0))
+                    all-game-objects))
+        #t)
+      #f))|#
+
+(define (game-over? g)
+  (and (<= (space-to-drop) 0)
+       (= (posn-y (game-object-position current)) 0)))
 
 (define (settle-mino!)
   (local [(define c (game-object-block current))
@@ -226,24 +292,6 @@
                                       (posn 4 0)))))
             
 (define (drop-current-mino!)
-  (local [(define c (game-object-block current))
-          (define colr (mino-colr c))]
-    (begin (for-each (λ (p)
-                       (set! all-game-objects
-                            (cons (game-object (mino-square colr)
-                                               (posn (+ (posn-x p)
-                                                        (posn-x (game-object-position current)))
-                                                     (+ (posn-y p) 18)))
-                                  all-game-objects)))
-                     (list-ref (mino-blockposns c) (mino-idx c)))
-           (set-game-object-block! current
-                                   (list-ref minos
-                                             (random (length minos))))
-           (set-game-object-position! current
-                                      (posn 4 0))
-           (set-mino-idx! (game-object-block current) 0))))
-  
-(define (drop-current-mino2!)
   (local [(define pos (game-object-position current))]
     (set-game-object-position! current
                              (posn (posn-x pos)
@@ -254,11 +302,11 @@
   (cond [(equal? key "up")
          (rotate-current!)]
         [(equal? key "left")
-         (move-aside! false)]
+         (move-aside! -1)]
         [(equal? key "right")
-         (move-aside! true)]
+         (move-aside! 1)]
         [(equal? key " ")
-         (drop-current-mino2!)]
+         (drop-current-mino!)]
         [else null]))
 
 
@@ -301,29 +349,36 @@
 
 
 (define (start-game)
-  (begin (void)
-         (big-bang all-game-objects
-           (on-key (λ (ignore key)
-                     (begin (on-key-press key)
-                            all-game-objects)))
-           (on-tick (lambda (obj)
-                      (begin (for-each update! obj)
-                             all-game-objects))
-                    frame-interval)
-           (to-draw (lambda (game-objects)
-                      (foldl (lambda (object scene)
-                               (place-image/align
-                                (render object)
-                                (* tile-size
-                                   (posn-x (game-object-position object)))
-                                (* tile-size
-                                   (posn-y (game-object-position object)))
-                                "left"
-                                "top"
-                                scene))
-                             board
-                             game-objects))
-                    (* tile-size 10) 
-                    (* tile-size 21)))))
+  (local [(define (todraw objs)
+            (foldl (λ (object scene)
+                     (place-image/align (render object)
+                                        (* tile-size
+                                           (posn-x (game-object-position object)))
+                                        (* tile-size
+                                           (posn-y (game-object-position object)))
+                                        "left"
+                                        "top"
+                                        scene))
+                   board
+                   objs))
+          (define (draw-gameover objs)
+            (place-image/align (text/font "Game Over!" 32 "white"
+                                          #f "modern" "normal"
+                                          "bold" #f)
+                               50
+                               250
+                               "left"
+                               "top"
+                               (todraw objs)))]                
+    (big-bang all-game-objects
+              (on-key (λ (ignore key)
+                        (begin (on-key-press key)
+                               all-game-objects)))
+              (on-tick (λ (obj)
+                         (begin (for-each update! obj)
+                                all-game-objects))
+                       frame-interval)
+              (stop-when game-over? draw-gameover)
+              (to-draw todraw))))
 
 (start-game)
